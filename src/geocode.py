@@ -42,42 +42,44 @@ def get_location_demographics_from_dict(address, result_limit=None, savepath='',
     print(len(get_location_demographics_from_dict(address, result_limit=None))) # There are 101 zipcodes for NYC in the Database.
     >>> 101
     """
+
+    # optimize input address for lookup
+    address['city'] = address['city'].title().lstrip().rstrip()
+    address['state'] = address['state'].upper().lstrip().rstrip()
+    address['zip'] = str(address['zip'])[:5]
+
     engine = SearchEngine(
         simple_or_comprehensive=SearchEngine.SimpleOrComprehensiveArgEnum.simple
     )
 
-    if by_city_state:
-        try:
+    try:
+        if by_city_state:
             result = engine.by_city_and_state(city=address['city'], state=address['state'], zipcode_type=ZipcodeTypeEnum.Standard, returns=result_limit)
 
-        except ValueError as v:
-            # print('Could not find value for City:', address['city'], 'State:',address['state'], 'skipping instead.')
-
-            # trigger function to drop these records in a CSV function for later analysis
-            with open(os.path.abspath(f'{savepath}/bad_addresses.csv'), 'a', encoding='UTF8', newline='') as f:
-                data = [address['zip'], address['city'], address['state']]
-                writer = csv.writer(f)
-                writer.writerow(data)
-
-            return []
-
-    else: # implies by_zipcode
-        try:
+        else:
             result = engine.by_zipcode(zipcode=address['zip'])
 
-        except ValueError as v:
+    except ValueError as v:
             # print('Could not find value for City:', address['city'], 'State:',address['state'], 'skipping instead.')
 
             # trigger function to drop these records in a CSV function for later analysis
-            with open(os.path.abspath(f'{savepath}/bad_zipcodes.csv'), 'a', encoding='UTF8', newline='') as f:
-                data = [address['zip'], address['city'], address['state']]
+            with open(os.path.abspath(f'{savepath}/value_errors.csv'), 'a', encoding='UTF8', newline='') as f:
+
                 writer = csv.writer(f)
+                row = address['row'].to_frame().T.values.flatten().tolist()
+
+                if f.tell()==0:
+                    header = ['Zip', 'City', 'State', 'Value Error']
+                    header += [i for i in range(0, len(row))]
+                    writer.writerow(header)
+
+                data = [address['zip'], address['city'], address['state'], v]
+                data += row
                 writer.writerow(data)
 
             return []
 
     return result
-
 
 def construct_municipal_area(address, result_limit=None, savepath='', by_city_state=True):
     """
@@ -173,8 +175,14 @@ def construct_municipal_area(address, result_limit=None, savepath='', by_city_st
         # trigger function to drop these records in a CSV function for later analysis
 
         with open(os.path.abspath(f'{savepath}/unresolveable_addresses.csv'), 'a', encoding='UTF8', newline='') as f:
-            data = [address['zip'], address['city'], address['state']]
+
             writer = csv.writer(f)
+
+            if f.tell()==0:
+                header = ['Zip', 'City', 'State', 'Attribute Error']
+                writer.writerow(header)
+
+            data = [address['zip'], address['city'], address['state'], a]
             writer.writerow(data)
 
         # For returning a blank dataframe
@@ -191,10 +199,16 @@ def construct_municipal_area(address, result_limit=None, savepath='', by_city_st
     df['median_household_income'] = df['median_household_income'].astype(int)
 
     row = address['row'].to_frame().T # convert series to a pd.DataFrame to append to metric columns
-    df[row.columns] = row
+
+    normalized_row = pd.concat([row] * len(df), ignore_index=True) # repeat row-information for as many zip codes as are returned
+
+    df = pd.concat([df, normalized_row], axis=1, ignore_index=False) # ensure row level details present for every zip code returned
 
     # Write intermediary step to file
-    df.to_csv(f'./{savepath}/enriched_addresses.csv', mode='a', index=False, header=False)
+    filename = f'./{savepath}/enriched_addresses.csv'
+
+    with open(filename, 'a', encoding='UTF8', newline='') as f:
+        df.to_csv(filename, mode='a', header=f.tell()==0)
 
     return df
 
@@ -232,6 +246,7 @@ def create_geographic_generalization(address, result_limit=None):
     df = df.describe().loc[['count', 'mean', 'std', 'min', 'max']]
     df['city'] = address['city']
     df['state'] = address['state']
+
     return df
 
 def _apply_construct_municipal_area(df, savepath, by_city_state):
@@ -245,7 +260,7 @@ def _apply_construct_municipal_area(df, savepath, by_city_state):
 
     return  # can process roughly 5K per hour per core
 
-def parrallelize_construct_municipal_area(df, n_cores=6, savepath='', by_city_state=True):
+def parallel_construct_municipal_area(df, n_cores=6, savepath='', by_city_state=True):
     """
     This function parrellel processes a dataframe running the _apply_construct_municipal_area across multiple cores.
     Pool management occurs in this function.
@@ -320,6 +335,5 @@ def parrallelize_construct_municipal_area(df, n_cores=6, savepath='', by_city_st
         print('by_city_state:', by_city_state)
 
         print('Please try imputing the missing values and then run again.')
-        print('Make sure that all zip codes are in 5 digit format.')
 
     return
