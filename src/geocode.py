@@ -55,7 +55,7 @@ def get_location_demographics_from_dict(address, result_limit=None, savepath='',
 
             # trigger function to drop these records in a CSV function for later analysis
             with open(os.path.abspath(f'{savepath}/bad_addresses.csv'), 'a', encoding='UTF8', newline='') as f:
-                data = [address['city'], address['state']]
+                data = [address['zip'], address['city'], address['state']]
                 writer = csv.writer(f)
                 writer.writerow(data)
 
@@ -70,7 +70,7 @@ def get_location_demographics_from_dict(address, result_limit=None, savepath='',
 
             # trigger function to drop these records in a CSV function for later analysis
             with open(os.path.abspath(f'{savepath}/bad_zipcodes.csv'), 'a', encoding='UTF8', newline='') as f:
-                data = [address['zip']]
+                data = [address['zip'], address['city'], address['state']]
                 writer = csv.writer(f)
                 writer.writerow(data)
 
@@ -132,39 +132,53 @@ def construct_municipal_area(address, result_limit=None, savepath='', by_city_st
         'median_household_income'
     ]
 
-    if by_city_state:
-        df = pd.concat([pd.DataFrame([
-                            [
-                                zipcode.zipcode,
-                                zipcode.major_city,
-                                zipcode.lat,
-                                zipcode.lng,
-                                zipcode.timezone,
-                                zipcode.radius_in_miles,
-                                zipcode.population,
-                                zipcode.population_density,
-                                zipcode.housing_units,
-                                zipcode.occupied_housing_units,
-                                zipcode.median_home_value,
-                                zipcode.median_household_income,
-                            ]
-                        ], columns=metrics) for zipcode in simple_zipcodes
-            ], ignore_index=True)
-    else:
-        df = pd.DataFrame([[
-                                simple_zipcodes.zipcode,
-                                simple_zipcodes.major_city,
-                                simple_zipcodes.lat,
-                                simple_zipcodes.lng,
-                                simple_zipcodes.timezone,
-                                simple_zipcodes.radius_in_miles,
-                                simple_zipcodes.population,
-                                simple_zipcodes.population_density,
-                                simple_zipcodes.housing_units,
-                                simple_zipcodes.occupied_housing_units,
-                                simple_zipcodes.median_home_value,
-                                simple_zipcodes.median_household_income,
-                            ]], columns=metrics)
+    try:
+        if by_city_state:
+            df = pd.concat([pd.DataFrame([
+                                [
+                                    zipcode.zipcode,
+                                    zipcode.major_city,
+                                    zipcode.lat,
+                                    zipcode.lng,
+                                    zipcode.timezone,
+                                    zipcode.radius_in_miles,
+                                    zipcode.population,
+                                    zipcode.population_density,
+                                    zipcode.housing_units,
+                                    zipcode.occupied_housing_units,
+                                    zipcode.median_home_value,
+                                    zipcode.median_household_income,
+                                ]
+                            ], columns=metrics) for zipcode in simple_zipcodes
+                ], ignore_index=True)
+        else:
+            df = pd.DataFrame([[
+                                    simple_zipcodes.zipcode,
+                                    simple_zipcodes.major_city,
+                                    simple_zipcodes.lat,
+                                    simple_zipcodes.lng,
+                                    simple_zipcodes.timezone,
+                                    simple_zipcodes.radius_in_miles,
+                                    simple_zipcodes.population,
+                                    simple_zipcodes.population_density,
+                                    simple_zipcodes.housing_units,
+                                    simple_zipcodes.occupied_housing_units,
+                                    simple_zipcodes.median_home_value,
+                                    simple_zipcodes.median_household_income,
+                                ]], columns=metrics)
+    except AttributeError as a:
+
+        print(a)
+        print('Could not resolve:', address['zip'], address['city'], address['state'])
+        # trigger function to drop these records in a CSV function for later analysis
+
+        with open(os.path.abspath(f'{savepath}/unresolveable_addresses.csv'), 'a', encoding='UTF8', newline='') as f:
+            data = [address['zip'], address['city'], address['state']]
+            writer = csv.writer(f)
+            writer.writerow(data)
+
+        # For returning a blank dataframe
+        df = pd.DataFrame(columns=metrics)
 
     df = df.fillna(value=0)
 
@@ -176,8 +190,11 @@ def construct_municipal_area(address, result_limit=None, savepath='', by_city_st
     df['median_home_value'] = df['median_home_value'].astype(int)
     df['median_household_income'] = df['median_household_income'].astype(int)
 
+    row = address['row'].to_frame().T # convert series to a pd.DataFrame to append to metric columns
+    df[row.columns] = row
+
     # Write intermediary step to file
-    df.to_csv(f'./{savepath}/enriched_addresses_in_progress.csv', mode='a', index=False, header=False)
+    df.to_csv(f'./{savepath}/enriched_addresses.csv', mode='a', index=False, header=False)
 
     return df
 
@@ -221,15 +238,23 @@ def _apply_construct_municipal_area(df, savepath, by_city_state):
     """
     This is a helper function to parrellilize the processing of contruct_municipal_area accross multiple cores.
     This function should be called from within a Pool.map() function.
+
+    The rest of the row (for reference purposes) is passed in as address['row']
     """
-    df.apply(lambda row: construct_municipal_area(address={'city': row['City'], 'state': row['State'], 'zip': row['Zip']}, savepath=savepath, by_city_state=by_city_state) ,axis=1)
+    df.apply(lambda row: construct_municipal_area(address={'city': row['City'], 'state': row['State'], 'zip': row['Zip'], 'row': row}, savepath=savepath, by_city_state=by_city_state), axis=1)
 
     return  # can process roughly 5K per hour per core
 
 def parrallelize_construct_municipal_area(df, n_cores=6, savepath='', by_city_state=True):
     """
     This function parrellel processes a dataframe running the _apply_construct_municipal_area across multiple cores.
-    Pool management occurs in this function
+    Pool management occurs in this function.
+
+    by_city_state=False executes roughly ~3x faster than by_city_state=True
+    by_city_state=False can process ~5k observations per core per hour.
+
+    Zip codes must by in 5 digit format.
+
     Parameters
     ----------
     df: pd.DataFrame
@@ -260,15 +285,41 @@ def parrallelize_construct_municipal_area(df, n_cores=6, savepath='', by_city_st
             'median_household_income'
     Example
     -------
-    relative_save_path = 'runs/runs_4'
-    df = parrallelize_construct_municipal_area(df_city_state, savepath=relative_save_path))
+    import os
+
+    relative_save_path = 'runs/run_1'
+    os.mkdir(os.path.abspath(relative_save_path))
+
+    # Impute NoneType zipcodes to 00501 -- no one lives here (special IRS zip code)
+    df_city_state['Zip'] = df_city_state['Zip'].fillna('00501')
+
+    # Truncate 9 digit zipcodes to 5 digits
+    df_city_state['Zip'] = df_city_state['Zip'].str[:5]
+
+    parrallelize_construct_municipal_area(df_city_state.iloc[:,:], n_cores=4, savepath=relative_save_path, by_city_state=False)
     """
 
     df_split = np.array_split(df, n_cores)
 
-    with Pool(processes=n_cores) as pool:
+    try:
 
-        pool.starmap(_apply_construct_municipal_area, zip(df_split, itertools.repeat(savepath), itertools.repeat(by_city_state)))
+        with Pool(processes=n_cores) as pool:
 
-    print('parrallelize_construct_municipal_area() has completed.')
-    return 
+            pool.starmap(_apply_construct_municipal_area, zip(df_split, itertools.repeat(savepath), itertools.repeat(by_city_state)))
+
+        print('parrallelize_construct_municipal_area() has completed.')
+
+    except AttributeError as a:
+        print(a)
+
+        for i, df in enumerate(df_split):
+
+            print(f'df_split ({i}): ', df)
+
+        print('savepath:', savepath)
+        print('by_city_state:', by_city_state)
+
+        print('Please try imputing the missing values and then run again.')
+        print('Make sure that all zip codes are in 5 digit format.')
+
+    return
