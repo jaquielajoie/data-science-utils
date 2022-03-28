@@ -1,4 +1,4 @@
-# Utils
+# Data Science Utils
 This directory houses functions that are useful for feature engineering.
 
 ## geocode.py
